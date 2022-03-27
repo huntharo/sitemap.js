@@ -8,29 +8,13 @@ import {
 import { SitemapItemLoose, ErrorLevel, ErrorHandler } from './types';
 import { validateSMIOptions, normalizeURL } from './utils';
 import { SitemapItemToXMLString } from './sitemap-item-stream';
-import { EmptyStream, EmptySitemap } from './errors';
-
-export class ByteLimitExceededError extends Error {
-  constructor(m: string) {
-    super(m);
-
-    // Set the prototype explicitly.
-    Object.setPrototypeOf(this, ByteLimitExceededError.prototype);
-  }
-
-  public readonly name: string = 'ByteLimitExceededError';
-}
-
-export class CountLimitExceededError extends Error {
-  constructor(m: string) {
-    super(m);
-
-    // Set the prototype explicitly.
-    Object.setPrototypeOf(this, CountLimitExceededError.prototype);
-  }
-
-  public readonly name: string = 'CountLimitExceededError';
-}
+import {
+  EmptyStream,
+  EmptySitemap,
+  CountLimitExceededError,
+  ByteLimitExceededError,
+  WriteAfterCloseTagError,
+} from './errors';
 
 const xmlDec = '<?xml version="1.0" encoding="UTF-8"?>';
 export const stylesheetInclude = (url: string): string => {
@@ -119,16 +103,9 @@ const defaultXMLNS: NSArgs = {
 const defaultStreamOpts: SitemapStreamOptions = {
   xmlns: defaultXMLNS,
 };
-/**
- * A [Transform](https://nodejs.org/api/stream.html#stream_implementing_a_transform_stream)
- * for turning a
- * [Readable stream](https://nodejs.org/api/stream.html#stream_readable_streams)
- * of either [SitemapItemOptions](#sitemap-item-options) or url strings into a
- * Sitemap. The readable stream it transforms **must** be in object mode.
- */
 export class SitemapStream extends Transform {
-  private byteLimit?: number;
-  private countLimit?: number;
+  private _byteLimit?: number;
+  private _countLimit?: number;
   private hostname?: string;
   private level: ErrorLevel;
   private hasHeadOutput: boolean;
@@ -139,7 +116,15 @@ export class SitemapStream extends Transform {
   private _itemCount: number;
   private _byteCount: number;
   private _wroteCloseTag: boolean;
-
+  /**
+   * A [Transform](https://nodejs.org/api/stream.html#stream_implementing_a_transform_stream)
+   * for turning a
+   * [Readable stream](https://nodejs.org/api/stream.html#stream_readable_streams)
+   * of either [SitemapItemOptions](#sitemap-item-options) or url strings into a
+   * Sitemap. The readable stream it transforms **must** be in object mode.
+   *
+   * @param opts
+   */
   constructor(opts = defaultStreamOpts) {
     opts.objectMode = true;
     super(opts);
@@ -150,8 +135,8 @@ export class SitemapStream extends Transform {
     this.lastmodDateOnly = opts.lastmodDateOnly || false;
     this.xmlNS = opts.xmlns || defaultXMLNS;
     this.xslUrl = opts.xslUrl;
-    this.byteLimit = opts.byteLimit;
-    this.countLimit = opts.countLimit;
+    this._byteLimit = opts.byteLimit;
+    this._countLimit = opts.countLimit;
     this._byteCount = 0;
     this._itemCount = 0;
     this._wroteCloseTag = false;
@@ -165,15 +150,58 @@ export class SitemapStream extends Transform {
     return this._itemCount;
   }
 
+  public get byteLimit(): number | undefined {
+    return this._byteLimit;
+  }
+
+  public set byteLimit(value: number | undefined) {
+    if (this._itemCount !== 0) {
+      throw new TypeError('cannot set byteLimit if items written already');
+    }
+    if (this._byteLimit !== undefined) {
+      throw new TypeError('cannot set byteLimit if already set');
+    }
+    if (value === undefined) {
+      delete this._byteLimit;
+    }
+
+    this._byteLimit = value;
+  }
+
+  public get countLimit(): number | undefined {
+    return this._countLimit;
+  }
+
+  public set countLimit(value: number | undefined) {
+    if (this._itemCount !== 0) {
+      throw new TypeError('cannot set countLimit if items written already');
+    }
+    if (this._countLimit !== undefined) {
+      throw new TypeError('cannot set countLimit if already set');
+    }
+    if (value === undefined) {
+      delete this._countLimit;
+    }
+
+    this._countLimit = value;
+  }
+
   public get wroteCloseTag(): boolean {
     return this._wroteCloseTag;
   }
 
-  _transform(
+  public _transform(
     item: SitemapItemLoose,
     encoding: string,
     callback: TransformCallback
   ): void {
+    if (this.wroteCloseTag) {
+      callback(
+        new WriteAfterCloseTagError('attempt to write after close tag written')
+      );
+      return;
+    }
+
     if (!this.hasHeadOutput) {
       // Add the opening tag size and closing tag size (since we have to close)
       this.hasHeadOutput = true;
@@ -183,11 +211,15 @@ export class SitemapStream extends Transform {
     }
 
     // Reject if item limit would be exceeded
-    if (this.countLimit !== undefined && this._itemCount === this.countLimit) {
+    if (
+      this._countLimit !== undefined &&
+      this._itemCount === this._countLimit
+    ) {
       // Write the close tag as the stream will be ended by raising an error
       this.push(closetag);
       this._wroteCloseTag = true;
 
+      // Transform will call .end()
       callback(
         new CountLimitExceededError(
           'Item count limit would be exceeded, not writing, stream will close'
@@ -206,12 +238,13 @@ export class SitemapStream extends Transform {
 
     // Check if the size would be exceeded by the new item
     // and throw if it would exceed (when size limit enabled)
-    if (this.byteLimit !== undefined) {
-      if (this._byteCount + Buffer.byteLength(itemOutput) > this.byteLimit) {
+    if (this._byteLimit !== undefined) {
+      if (this._byteCount + Buffer.byteLength(itemOutput) > this._byteLimit) {
         // Write the close tag as the stream will be ended by raising an error
         this.push(closetag);
         this._wroteCloseTag = true;
 
+        // Transform will call .end()
         callback(
           new ByteLimitExceededError(
             'Byte count limit would be exceeded, not writing, stream will close'
@@ -228,7 +261,7 @@ export class SitemapStream extends Transform {
     callback();
   }
 
-  _flush(cb: TransformCallback): void {
+  public _flush(cb: TransformCallback): void {
     if (this._wroteCloseTag) {
       cb();
     } else if (!this.hasHeadOutput) {
@@ -239,6 +272,35 @@ export class SitemapStream extends Transform {
       this.push(closetag);
       cb();
     }
+  }
+
+  /**
+   * Async helper for writing items to the stream
+   *
+   * @param chunk SitemapItemLoose | URL string
+   * @param encoding
+   * @returns
+   */
+  public async writeAsync(
+    chunk: SitemapItemLoose | string,
+    encoding?: BufferEncoding
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const writeReturned = this.write(chunk, encoding, (error) => {
+        const resolver = (error: Error | null | undefined): void => {
+          if (error !== undefined) {
+            reject(error);
+          } else {
+            resolve();
+          }
+        };
+        if (!writeReturned && !this.wroteCloseTag) {
+          this.once('drain', () => resolver(error));
+        } else {
+          process.nextTick(() => resolver(error));
+        }
+      });
+    });
   }
 }
 

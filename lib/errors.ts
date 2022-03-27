@@ -270,3 +270,30 @@ export class EmptySitemap extends Error {
     Error.captureStackTrace(this, EmptyStream);
   }
 }
+
+export class ByteLimitExceededError extends Error {
+  constructor(m: string) {
+    super(m);
+    this.name = 'ByteLimitExceededError';
+    // Set the prototype explicitly for `instanceof`
+    Object.setPrototypeOf(this, ByteLimitExceededError.prototype);
+  }
+}
+
+export class CountLimitExceededError extends Error {
+  constructor(m: string) {
+    super(m);
+    this.name = 'CountLimitExceededError';
+    // Set the prototype explicitly for `instanceof`
+    Object.setPrototypeOf(this, CountLimitExceededError.prototype);
+  }
+}
+
+export class WriteAfterCloseTagError extends Error {
+  constructor(m: string) {
+    super(m);
+    this.name = 'WriteAfterCloseTagError';
+    // Set the prototype explicitly for `instanceof`
+    Object.setPrototypeOf(this, WriteAfterCloseTagError.prototype);
+  }
+}

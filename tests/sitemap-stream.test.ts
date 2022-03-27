@@ -6,21 +6,27 @@ import {
   closetag,
   streamToPromise,
 } from '../lib/sitemap-stream';
+import { createWriteStream } from 'fs';
+import { ByteLimitExceededError, CountLimitExceededError } from '../lib/errors';
 
 const finishedAsync = promisify(finished);
 
-const minimumns =
-  '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"';
+const charset = '<?xml version="1.0" encoding="UTF-8"?>';
+const urlset = '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"';
+const minimumns = charset + urlset;
 const news = ' xmlns:news="http://www.google.com/schemas/sitemap-news/0.9"';
 const xhtml = ' xmlns:xhtml="http://www.w3.org/1999/xhtml"';
 const image = ' xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"';
 const video = ' xmlns:video="http://www.google.com/schemas/sitemap-video/1.1"';
+const urlsetMins = urlset + news + xhtml + image + video + '>';
 const preamble = minimumns + news + xhtml + image + video + '>';
 describe('sitemap stream', () => {
   const sampleURLs = ['http://example.com', 'http://example.com/path'];
 
   it('pops out the preamble and closetag', async () => {
-    const sms = new SitemapStream();
+    const sms = new SitemapStream({
+      xslUrl: 'https://example.com/style.xsl',
+    });
     sms.write(sampleURLs[0]);
     sms.write(sampleURLs[1]);
     sms.end();
@@ -28,11 +34,77 @@ describe('sitemap stream', () => {
     const outputStr = (await streamToPromise(sms)).toString();
     expect(sms.byteCount).toBe(outputStr.length);
     expect(outputStr).toBe(
-      preamble +
+      charset +
+        '<?xml-stylesheet type="text/xsl" href="https://example.com/style.xsl"?>' +
+        urlsetMins +
         `<url><loc>${sampleURLs[0]}/</loc></url>` +
         `<url><loc>${sampleURLs[1]}</loc></url>` +
         closetag
     );
+  });
+
+  it('normal write closes cleanly', async () => {
+    const drain = [];
+    const sink = new Writable({
+      write(chunk, enc, next): void {
+        drain.push(chunk);
+        next();
+      },
+    });
+
+    const pipelineCallback = jest.fn();
+
+    const sms = new SitemapStream({ countLimit: 1 });
+
+    pipeline(sms, sink, pipelineCallback);
+
+    // const writeAsync = (
+    //   chunk: any,
+    //   encoding?: BufferEncoding
+    // ): Promise<boolean> => {
+    //   return new Promise<boolean>((resolve, reject) => {
+    //     const writeReturned = sms.write(chunk, encoding, (error) => {
+    //       if (error !== undefined) {
+    //         reject(error);
+    //       } else {
+    //         resolve(writeReturned);
+    //       }
+    //     });
+    //   });
+    // };
+
+    // This write will succeed
+    await sms.writeAsync(sampleURLs[0]);
+    expect(sms.itemCount).toBe(1);
+    expect(sms.byteCount).toBe(375);
+    expect(sms.wroteCloseTag).toBe(false);
+
+    // Close the stream and wait for the sink to close
+    sms.end();
+
+    expect(sms.wroteCloseTag).toBe(true);
+
+    await finishedAsync(sink);
+
+    // Write after error should indicate already closed
+    await expect(async () => sms.writeAsync(sampleURLs[1])).rejects.toThrow(
+      'write after end'
+    );
+
+    // Node 12 hangs on this await, Node 14 fixes it
+    // if (process.version.split('.')[0] !== 'v12') {
+    //   await finishedAsync(sms);
+    // }
+
+    // Closing should generate a valid file after the exception
+    const outputStr = Buffer.concat(drain).toString();
+
+    expect(sms.byteCount).toBe(outputStr.length);
+    expect(outputStr).toBe(
+      preamble + `<url><loc>${sampleURLs[0]}/</loc></url>` + closetag
+    );
+
+    expect(pipelineCallback).toBeCalledTimes(1);
   });
 
   it('emits error on item count would be exceeded', async () => {
@@ -49,28 +121,13 @@ describe('sitemap stream', () => {
 
     pipeline(sms, sink, pipelineCallback);
 
-    const writeAsync = (
-      chunk: any,
-      encoding?: BufferEncoding
-    ): Promise<boolean> => {
-      return new Promise<boolean>((resolve, reject) => {
-        const writeReturned = sms.write(chunk, encoding, (error) => {
-          if (error !== undefined) {
-            reject(error);
-          } else {
-            resolve(writeReturned);
-          }
-        });
-      });
-    };
-
     // This write will succeed
-    await writeAsync(sampleURLs[0]);
+    await sms.writeAsync(sampleURLs[0]);
     expect(sms.itemCount).toBe(1);
     expect(sms.wroteCloseTag).toBe(false);
 
     // This write will fail
-    await expect(() => writeAsync(sampleURLs[1])).rejects.toThrow(
+    await expect(async () => sms.writeAsync(sampleURLs[1])).rejects.toThrow(
       'Item count limit would be exceeded, not writing, stream will close'
     );
 
@@ -114,33 +171,82 @@ describe('sitemap stream', () => {
 
     pipeline(sms, sink, pipelineCallback);
 
-    const writeAsync = (
-      chunk: any,
-      encoding?: BufferEncoding
-    ): Promise<boolean> => {
-      return new Promise<boolean>((resolve, reject) => {
-        const writeReturned = sms.write(chunk, encoding, (error) => {
-          if (error !== undefined) {
-            reject(error);
-          } else {
-            resolve(writeReturned);
-          }
-        });
-      });
-    };
-
     // This write will succeed
-    await writeAsync(sampleURLs[0]);
+    await sms.writeAsync(sampleURLs[0]);
     expect(sms.itemCount).toBe(1);
     expect(sms.byteCount).toBe(375);
     expect(sms.wroteCloseTag).toBe(false);
 
-    await expect(() => writeAsync(sampleURLs[1])).rejects.toThrow(
-      'Byte count limit would be exceeded, not writing, stream will close'
+    await expect(async () => sms.writeAsync(sampleURLs[1])).rejects.toThrow(
+      new ByteLimitExceededError(
+        'Byte count limit would be exceeded, not writing, stream will close'
+      )
     );
 
     expect(sms.wroteCloseTag).toBe(true);
     expect(sms.destroyed).toBe(true);
+
+    // Write after error should indicate already closed
+    await expect(async () => sms.writeAsync(sampleURLs[1])).rejects.toThrow(
+      'Cannot call write after a stream was destroyed'
+    );
+
+    try {
+      await sms.writeAsync(sampleURLs[1]);
+    } catch (error: any) {
+      expect(error.code).toBe('ERR_STREAM_DESTROYED');
+    }
+
+    // Node 12 hangs on this await, Node 14 fixes it
+    if (process.version.split('.')[0] !== 'v12') {
+      await finishedAsync(sms);
+    }
+
+    // Closing should generate a valid file after the exception
+    const outputStr = Buffer.concat(drain).toString();
+
+    expect(sms.byteCount).toBe(outputStr.length);
+    expect(outputStr).toBe(
+      preamble + `<url><loc>${sampleURLs[0]}/</loc></url>` + closetag
+    );
+
+    expect(pipelineCallback).toBeCalledTimes(1);
+  });
+
+  it('throws on item count would be exceeded', async () => {
+    const drain = [];
+    const sink = new Writable({
+      write(chunk, enc, next): void {
+        drain.push(chunk);
+        next();
+      },
+    });
+
+    const pipelineCallback = jest.fn();
+
+    const sms = new SitemapStream({ countLimit: 1 });
+
+    pipeline(sms, sink, pipelineCallback);
+
+    // This write will succeed
+    await sms.writeAsync(sampleURLs[0]);
+    expect(sms.itemCount).toBe(1);
+    expect(sms.byteCount).toBe(375);
+    expect(sms.wroteCloseTag).toBe(false);
+
+    await expect(async () => sms.writeAsync(sampleURLs[1])).rejects.toThrow(
+      new CountLimitExceededError(
+        'Item count limit would be exceeded, not writing, stream will close'
+      )
+    );
+
+    expect(sms.wroteCloseTag).toBe(true);
+    expect(sms.destroyed).toBe(true);
+
+    // Write after error should indicate already closed
+    await expect(async () => sms.writeAsync(sampleURLs[1])).rejects.toThrow(
+      'Cannot call write after a stream was destroyed'
+    );
 
     // Node 12 hangs on this await, Node 14 fixes it
     if (process.version.split('.')[0] !== 'v12') {
@@ -174,7 +280,7 @@ describe('sitemap stream', () => {
     sms.write(sampleURLs[0]);
     sms.write(sampleURLs[1]);
     sms.end();
-    await expect((await streamToPromise(sms)).toString()).toBe(
+    expect((await streamToPromise(sms)).toString()).toBe(
       minimumns +
         xhtml +
         image +
@@ -222,5 +328,89 @@ describe('sitemap stream', () => {
         `<url><loc>https://example.com/path</loc><changefreq>invalid</changefreq></url>` +
         closetag
     );
+  });
+
+  describe('countLimit / byteLimit properties', () => {
+    it('exposes countLimit property', () => {
+      const sms = new SitemapStream({ countLimit: 400 });
+      expect(sms.countLimit).toBe(400);
+    });
+
+    it('allows setting countLimit property if unset', () => {
+      const sms = new SitemapStream();
+      expect(sms.countLimit).toBeUndefined();
+      sms.countLimit = 400;
+      expect(sms.countLimit).toBe(400);
+    });
+
+    it('throws if countLimit set after items written', async () => {
+      const sink = createWriteStream('/dev/null');
+      const sms = new SitemapStream({});
+      sms.pipe(sink);
+
+      // This write will succeed
+      await sms.writeAsync(sampleURLs[0]);
+      expect(sms.itemCount).toBe(1);
+
+      expect(() => {
+        sms.countLimit = 2;
+      }).toThrow('cannot set countLimit if items written already');
+
+      sms.end();
+      await finishedAsync(sink);
+    });
+
+    it('throws if countLimit set twice', async () => {
+      const sms = new SitemapStream({});
+      sms.countLimit = 1;
+
+      expect(() => {
+        sms.countLimit = 2;
+      }).toThrow('cannot set countLimit if already set');
+
+      await sms.writeAsync(sampleURLs[0]);
+      sms.end();
+    });
+
+    it('exposes byteLimit property', () => {
+      const sms = new SitemapStream({ byteLimit: 400 });
+      expect(sms.byteLimit).toBe(400);
+    });
+
+    it('allows setting byteLimit property if unset', () => {
+      const sms = new SitemapStream();
+      expect(sms.byteLimit).toBeUndefined();
+      sms.byteLimit = 400;
+      expect(sms.byteLimit).toBe(400);
+    });
+
+    it('throws if byteLimit set after items written', async () => {
+      const sink = createWriteStream('/dev/null');
+      const sms = new SitemapStream({});
+      sms.pipe(sink);
+
+      // This write will succeed
+      await sms.writeAsync(sampleURLs[0]);
+      expect(sms.itemCount).toBe(1);
+
+      expect(() => {
+        sms.byteLimit = 2;
+      }).toThrow('cannot set byteLimit if items written already');
+
+      sms.end();
+      await finishedAsync(sink);
+    });
+
+    it('throws if byteLimit set twice', async () => {
+      const sms = new SitemapStream({});
+      sms.byteLimit = 1000;
+
+      expect(() => {
+        sms.byteLimit = 2000;
+      }).toThrow('cannot set byteLimit if already set');
+
+      await sms.writeAsync(sampleURLs[0]);
+      sms.end();
+    });
   });
 });

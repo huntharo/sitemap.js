@@ -3,6 +3,7 @@ import { IndexItem, SitemapItemLoose, ErrorLevel } from './types';
 import { SitemapStream, stylesheetInclude } from './sitemap-stream';
 import { element, otag, ctag } from './sitemap-xml';
 import { WriteStream } from 'fs';
+import { ByteLimitExceededError, CountLimitExceededError } from './errors';
 
 export enum IndexTagNames {
   sitemap = 'sitemap',
@@ -72,73 +73,231 @@ export class SitemapIndexStream extends Transform {
     this.push(closetag);
     cb();
   }
+
+  /**
+   * Async helper for writing items to the stream
+   *
+   * @param chunk SitemapItemLoose | URL string
+   * @param encoding
+   * @returns
+   */
+  public async writeAsync(
+    chunk: IndexItem | string,
+    encoding?: BufferEncoding
+  ): Promise<boolean> {
+    return new Promise<boolean>((resolve, reject) => {
+      const writeReturned = this.write(chunk, encoding, (error) => {
+        if (error !== undefined) {
+          reject(error);
+        } else {
+          resolve(writeReturned);
+        }
+      });
+    });
+  }
 }
 
 type getSitemapStream = (
   i: number
+  // countLimit: number,
+  // byteLimit: number
 ) => [IndexItem | string, SitemapStream, WriteStream];
 
 export interface SitemapAndIndexStreamOptions
   extends SitemapIndexStreamOptions {
   level?: ErrorLevel;
+
+  /**
+   * @deprecated Use `countLimit` instead, `limit` will overwrite `countLimit` if specified.
+   */
   limit?: number;
+
+  /**
+   * Byte limit to allow in each sitemap before rotating to a new sitemap
+   *
+   * Sitemaps are supposed to be 50 MB or less in total size
+   *
+   * @default 45MB (45 * 1024 * 1024 bytes)
+   */
+  byteLimit?: number;
+
+  /**
+   * Count of items to allow in each sitemap before rotating to a new sitemap
+   *
+   * Sitemaps are supposed to have 50,000 or less items
+   *
+   * @default 45,000
+   */
+  countLimit?: number;
+
+  /**
+   * Called every time a sitemap file needs to be created either
+   * due to initialization or due to exceeding `byteLimit` or `countLimit`.
+   *
+   * Returns an array of:
+   *  - 0: string or IndexItem with the URL where the newly
+   *       created SitemapStream is intended to be hosted
+   *  - 1: SitemapStream destination for writing SitemapItem's
+   *  - 2: WriteStream for the underlying file or final sink
+   *       for the written items.
+   *       Used to wait for completion of writing to the sink.
+   */
   getSitemapStream: getSitemapStream;
 }
-// const defaultSIStreamOpts: SitemapAndIndexStreamOptions = {};
 export class SitemapAndIndexStream extends SitemapIndexStream {
-  private i: number;
+  private itemCountTotal: number;
+  private sitemapCount: number;
   private getSitemapStream: getSitemapStream;
   private currentSitemap: SitemapStream;
   private currentSitemapPipeline?: WriteStream;
   private idxItem: IndexItem | string;
-  private limit: number;
+  private countLimit: number;
+  private byteLimit: number;
+  /**
+   * Create a sitemap index and set of sitemaps from a stream
+   * of sitemap items.
+   *
+   * The number of sitemaps is determined by `byteLimit` and `countLimit`,
+   * with new sitemaps being created either exactly at the `countLimt`
+   * or when writing an item would cause the `byteLimit` to be exceeded.
+   *
+   * @param opts Options
+   */
   constructor(opts: SitemapAndIndexStreamOptions) {
     opts.objectMode = true;
     super(opts);
-    this.i = 0;
+    this.itemCountTotal = 0;
+    this.sitemapCount = 0;
     this.getSitemapStream = opts.getSitemapStream;
     [this.idxItem, this.currentSitemap, this.currentSitemapPipeline] =
-      this.getSitemapStream(0);
-    this.limit = opts.limit ?? 45000;
+      this.getSitemapStream(this.sitemapCount);
+
+    this.currentSitemap.on('error', (error: any) => {
+      if (
+        !(
+          error instanceof ByteLimitExceededError ||
+          error instanceof CountLimitExceededError ||
+          error.code === 'ERR_STREAM_DESTROYED'
+        )
+      ) {
+        throw error;
+      }
+    });
+    this.countLimit = opts.limit ?? opts.countLimit ?? 45000;
+    this.byteLimit = opts.byteLimit ?? 45 * 1024 * 1024;
+    this.currentSitemap.countLimit = this.countLimit;
+    this.currentSitemap.byteLimit = this.byteLimit;
   }
 
-  _writeSMI(item: SitemapItemLoose, callback: () => void): void {
-    this.i++;
-    if (!this.currentSitemap.write(item)) {
+  public _writeSMI(
+    item: SitemapItemLoose,
+    encoding: string,
+    callback: () => void
+  ): void {
+    if (
+      !this.currentSitemap.write(item, (error: any) => {
+        if (error !== undefined && error !== null) {
+          if (
+            error instanceof ByteLimitExceededError ||
+            error instanceof CountLimitExceededError
+          ) {
+            // Handle the rotate
+            this.sitemapCount++;
+
+            // Item could not be written because sitemap would overflow
+            // Create a new sitemap and write the item to the new sitemap
+            [this.idxItem, this.currentSitemap, this.currentSitemapPipeline] =
+              this.getSitemapStream(this.sitemapCount);
+            this.currentSitemap.byteLimit = this.byteLimit;
+            this.currentSitemap.countLimit = this.countLimit;
+            this.currentSitemap.on('error', (error: any) => {
+              if (
+                !(
+                  error instanceof ByteLimitExceededError ||
+                  error instanceof CountLimitExceededError ||
+                  error.code === 'ERR_STREAM_DESTROYED'
+                )
+              ) {
+                throw error;
+              }
+            });
+
+            if (
+              this.currentSitemapPipeline !== undefined &&
+              !this.currentSitemapPipeline.writableFinished
+            ) {
+              this.currentSitemapPipeline.on('finish', () =>
+                this._writeSMI(item, encoding, () => {
+                  // push to index stream
+                  super._transform(this.idxItem, encoding, callback);
+                })
+              );
+            } else {
+              this._writeSMI(item, encoding, () => {
+                // push to index stream
+                super._transform(this.idxItem, encoding, callback);
+              });
+            }
+
+            this._writeSMI(item, encoding, () => {
+              // push to index stream
+              super._transform(this.idxItem, encoding, callback);
+            });
+
+            // // Reached the countLimit before byteLimit exceeded
+            // const onFinish = () => {
+            //   [this.idxItem, this.currentSitemap, this.currentSitemapPipeline] =
+            //     this.getSitemapStream(this.itemCountTotal / this.countLimit);
+            //   this.currentSitemap.byteLimit = this.byteLimit;
+            //   this.currentSitemap.countLimit = this.countLimit;
+            //   this._writeSMI(item, encoding, () =>
+            //     // push to index stream
+            //     super._transform(this.idxItem, encoding, callback)
+            //   );
+            // };
+            // this.currentSitemapPipeline?.on('finish', onFinish);
+            // this.currentSitemap.end(
+            //   !this.currentSitemapPipeline ? onFinish : undefined
+            // );
+
+            return true;
+          }
+
+          if (error.code === 'ERR_STREAM_DESTROYED') {
+            // Write the item again to the current sitemap
+            // This will only happen once per item
+            this._writeSMI(item, encoding, callback);
+
+            return true;
+          }
+
+          return false;
+        }
+      })
+    ) {
       this.currentSitemap.once('drain', callback);
     } else {
       process.nextTick(callback);
     }
   }
 
-  _transform(
+  public _transform(
     item: SitemapItemLoose,
     encoding: string,
     callback: TransformCallback
   ): void {
-    if (this.i === 0) {
-      this._writeSMI(item, () =>
-        super._transform(this.idxItem, encoding, callback)
-      );
-    } else if (this.i % this.limit === 0) {
-      const onFinish = () => {
-        const [idxItem, currentSitemap, currentSitemapPipeline] =
-          this.getSitemapStream(this.i / this.limit);
-        this.currentSitemap = currentSitemap;
-        this.currentSitemapPipeline = currentSitemapPipeline;
-        // push to index stream
-        this._writeSMI(item, () =>
-          // push to index stream
-          super._transform(idxItem, encoding, callback)
-        );
-      };
-      this.currentSitemapPipeline?.on('finish', onFinish);
-      this.currentSitemap.end(
-        !this.currentSitemapPipeline ? onFinish : undefined
-      );
+    if (this.itemCountTotal === 0) {
+      // Add first item of sitemap to the sitemap and add sitemap to index
+      // Note: we do not need this for sitemap rotations
+      // because the new sitemap is added to the index in the error handler
+      this._writeSMI(item, encoding, () => {
+        super._transform(this.idxItem, encoding, callback);
+      });
     } else {
-      this._writeSMI(item, callback);
+      // Write the item, let the error handler perform the rotations
+      this._writeSMI(item, encoding, callback);
     }
+    this.itemCountTotal++;
   }
 
   _flush(cb: TransformCallback): void {
