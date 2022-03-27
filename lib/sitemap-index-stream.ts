@@ -1,4 +1,10 @@
-import { Transform, TransformOptions, TransformCallback } from 'stream';
+import {
+  Transform,
+  TransformOptions,
+  TransformCallback,
+  finished,
+} from 'stream';
+import { promisify } from 'util';
 import { IndexItem, SitemapItemLoose, ErrorLevel } from './types';
 import { SitemapStream, stylesheetInclude } from './sitemap-stream';
 import { element, otag, ctag } from './sitemap-xml';
@@ -8,6 +14,8 @@ import {
   CountLimitExceededError,
   WriteAfterCloseTagError,
 } from './errors';
+
+const finishedAsync = promisify(finished);
 
 export enum IndexTagNames {
   sitemap = 'sitemap',
@@ -157,6 +165,8 @@ export class SitemapAndIndexStream extends SitemapIndexStream {
   private idxItem: IndexItem | string;
   private countLimit: number;
   private byteLimit: number;
+  private pendingWrites: number;
+  private pendingFlushCallbacks: TransformCallback[];
   /**
    * Create a sitemap index and set of sitemaps from a stream
    * of sitemap items.
@@ -171,6 +181,8 @@ export class SitemapAndIndexStream extends SitemapIndexStream {
     opts.objectMode = true;
     super(opts);
     this.itemCountTotal = 0;
+    this.pendingWrites = 0;
+    this.pendingFlushCallbacks = [];
     this.sitemapCount = 0;
     this.getSitemapStream = opts.getSitemapStream;
     [this.idxItem, this.currentSitemap, this.currentSitemapPipeline] =
@@ -195,104 +207,308 @@ export class SitemapAndIndexStream extends SitemapIndexStream {
     this.currentSitemap.byteLimit = this.byteLimit;
   }
 
-  public _writeSMI(
-    item: SitemapItemLoose,
-    encoding: string,
-    callback: () => void
-  ): void {
-    if (
-      !this.currentSitemap.write(item, (error: any) => {
-        if (error !== undefined && error !== null) {
-          if (
-            error instanceof ByteLimitExceededError ||
-            error instanceof CountLimitExceededError
-          ) {
-            // Handle the rotate
-            this.sitemapCount++;
+  // public _writeSMI(
+  //   item: SitemapItemLoose,
+  //   encoding: string,
+  //   callback: () => void
+  // ): void {
+  //   if (
+  //     !this.currentSitemap.write(item, (error: any) => {
+  //       if (error !== undefined && error !== null) {
+  //         if (
+  //           error instanceof ByteLimitExceededError ||
+  //           error instanceof CountLimitExceededError
+  //         ) {
+  //           // Handle the rotate
+  //           this.sitemapCount++;
 
-            // Item could not be written because sitemap would overflow
-            // Create a new sitemap and write the item to the new sitemap
-            [this.idxItem, this.currentSitemap, this.currentSitemapPipeline] =
-              this.getSitemapStream(this.sitemapCount);
-            this.currentSitemap.byteLimit = this.byteLimit;
-            this.currentSitemap.countLimit = this.countLimit;
-            this.currentSitemap.on('error', (error: any) => {
-              if (
-                !(
-                  error instanceof ByteLimitExceededError ||
-                  error instanceof CountLimitExceededError ||
-                  error instanceof WriteAfterCloseTagError ||
-                  error.code === 'ERR_STREAM_WRITE_AFTER_END' ||
-                  error.code === 'ERR_STREAM_DESTROYED'
-                )
-              ) {
-                throw error;
-              }
-            });
+  //           // Item could not be written because sitemap would overflow
+  //           // Create a new sitemap and write the item to the new sitemap
+  //           [this.idxItem, this.currentSitemap, this.currentSitemapPipeline] =
+  //             this.getSitemapStream(this.sitemapCount);
+  //           this.currentSitemap.byteLimit = this.byteLimit;
+  //           this.currentSitemap.countLimit = this.countLimit;
+  //           this.currentSitemap.on('error', (error: any) => {
+  //             if (
+  //               !(
+  //                 error instanceof ByteLimitExceededError ||
+  //                 error instanceof CountLimitExceededError ||
+  //                 error instanceof WriteAfterCloseTagError ||
+  //                 error.code === 'ERR_STREAM_WRITE_AFTER_END' ||
+  //                 error.code === 'ERR_STREAM_DESTROYED'
+  //               )
+  //             ) {
+  //               throw error;
+  //             }
+  //           });
 
-            if (
-              this.currentSitemapPipeline !== undefined &&
-              !this.currentSitemapPipeline.writableFinished
-            ) {
-              this.currentSitemapPipeline.on('finish', () =>
-                this._writeSMI(item, encoding, () => {
-                  // push to index stream
-                  super._transform(this.idxItem, encoding, callback);
-                })
-              );
-            } else {
-              this._writeSMI(item, encoding, () => {
-                // push to index stream
-                super._transform(this.idxItem, encoding, callback);
-              });
-            }
+  //           if (
+  //             this.currentSitemapPipeline !== undefined &&
+  //             !this.currentSitemapPipeline.writableFinished
+  //           ) {
+  //             this.currentSitemapPipeline.on('finish', () =>
+  //               this._writeSMI(item, encoding, () => {
+  //                 // push to index stream
+  //                 super._transform(this.idxItem, encoding, callback);
+  //               })
+  //             );
+  //           } else {
+  //             this._writeSMI(item, encoding, () => {
+  //               // push to index stream
+  //               super._transform(this.idxItem, encoding, callback);
+  //             });
+  //           }
 
-            return true;
-          }
+  //           return true;
+  //         }
 
-          if (
-            error instanceof WriteAfterCloseTagError ||
-            error.code === 'ERR_STREAM_WRITE_AFTER_END' ||
-            error.code === 'ERR_STREAM_DESTROYED'
-          ) {
-            // Write the item again to the current sitemap
-            // This will only happen once per item
-            this._writeSMI(item, encoding, callback);
+  //         if (
+  //           error instanceof WriteAfterCloseTagError ||
+  //           error.code === 'ERR_STREAM_WRITE_AFTER_END' ||
+  //           error.code === 'ERR_STREAM_DESTROYED'
+  //         ) {
+  //           // Write the item again to the current sitemap
+  //           // This will only happen once per item
+  //           this._writeSMI(item, encoding, callback);
 
-            return true;
-          }
+  //           return true;
+  //         }
 
-          return false;
-        }
-      })
-    ) {
-      this.currentSitemap.once('drain', callback);
-    } else {
-      process.nextTick(callback);
-    }
-  }
+  //         return false;
+  //       }
+  //     })
+  //   ) {
+  //     this.currentSitemap.once('drain', callback);
+  //   } else {
+  //     process.nextTick(callback);
+  //   }
+  // }
 
   public _transform(
     item: SitemapItemLoose,
     encoding: string,
     callback: TransformCallback
   ): void {
-    if (this.itemCountTotal === 0) {
-      // Add first item of sitemap to the sitemap and add sitemap to index
-      // Note: we do not need this for sitemap rotations
-      // because the new sitemap is added to the index in the error handler
-      this._writeSMI(item, encoding, () => {
-        super._transform(this.idxItem, encoding, callback);
+    this.pendingWrites++;
+
+    const superTransformAsync = async (
+      item: string | IndexItem,
+      encoding: string
+    ): Promise<void> => {
+      return new Promise<void>((resolve, reject) => {
+        super._transform(item, encoding, (error) => {
+          if (error !== undefined && error !== null) {
+            reject(error);
+          } else {
+            resolve();
+          }
+        });
       });
-    } else {
-      // Write the item, let the error handler perform the rotations
-      this._writeSMI(item, encoding, callback);
-    }
-    this.itemCountTotal++;
+    };
+
+    (async () => {
+      try {
+        const sitemapAtStart = this.currentSitemap;
+        this.itemCountTotal++;
+
+        if (typeof item !== 'string') {
+          console.log('not a string');
+        }
+
+        if (this.itemCountTotal === undefined) {
+          console.log('should not happen');
+        }
+
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          try {
+            if (this.itemCountTotal === 1) {
+              this.sitemapCount++;
+
+              await this.currentSitemap.writeAsync(
+                item,
+                encoding as BufferEncoding
+              );
+              await superTransformAsync(this.idxItem, encoding);
+            } else {
+              await this.currentSitemap.writeAsync(
+                item,
+                encoding as BufferEncoding
+              );
+            }
+
+            console.log(`Wrote item to sitemap`, {
+              pendingFlushCallbacks: this.pendingFlushCallbacks.length,
+              pendingWrites: this.pendingWrites,
+              sitemapCount: this.sitemapCount,
+              itemCountTotal: this.itemCountTotal,
+              item,
+              sitemapPath: this.currentSitemapPipeline?.path,
+            });
+
+            // If we get here it was a success
+            callback();
+            return;
+          } catch (error: any) {
+            // Check if we need to rotate the file
+            if (
+              error instanceof ByteLimitExceededError ||
+              error instanceof CountLimitExceededError
+            ) {
+              console.log(`Rotating sitemap`, {
+                pendingFlushCallbacks: this.pendingFlushCallbacks.length,
+                pendingWrites: this.pendingWrites,
+                sitemapCount: this.sitemapCount,
+                itemCountTotal: this.itemCountTotal,
+                item,
+                sitemapPath: this.currentSitemapPipeline?.path,
+              });
+
+              await finishedAsync(this.currentSitemap);
+
+              console.log(`Rotating sitemap - prior finished`, {
+                pendingFlushCallbacks: this.pendingFlushCallbacks.length,
+                pendingWrites: this.pendingWrites,
+                sitemapCount: this.sitemapCount,
+                itemCountTotal: this.itemCountTotal,
+                item,
+                sitemapPath: this.currentSitemapPipeline?.path,
+              });
+
+              // Item could not be written because sitemap would overflow
+              // Create a new sitemap and write the item to the new sitemap
+              [this.idxItem, this.currentSitemap, this.currentSitemapPipeline] =
+                this.getSitemapStream(this.sitemapCount);
+
+              // Set the limits on the new sitemap
+              this.currentSitemap.byteLimit = this.byteLimit;
+              this.currentSitemap.countLimit = this.countLimit;
+
+              // This is to prevent the default .on('error') handler
+              // from throwing on every exception, even those that we handle
+              this.currentSitemap.on('error', (error: any) => {
+                if (
+                  !(
+                    error instanceof ByteLimitExceededError ||
+                    error instanceof CountLimitExceededError ||
+                    error instanceof WriteAfterCloseTagError ||
+                    error.code === 'ERR_STREAM_WRITE_AFTER_END' ||
+                    error.code === 'ERR_STREAM_DESTROYED'
+                  )
+                ) {
+                  throw error;
+                }
+              });
+
+              // console.log(`Rotating sitemap - calling super._transform`, {
+              //   pendingFlushCallbacks: this.pendingFlushCallbacks.length,
+              //   pendingWrites: this.pendingWrites,
+              //   sitemapCount: this.sitemapCount,
+              //   itemCountTotal: this.itemCountTotal,
+              //   item,
+              //   sitemapPath: this.currentSitemapPipeline?.path,
+              // });
+
+              await superTransformAsync(this.idxItem, encoding);
+
+              // console.log(`Rotating sitemap - super._transform returned`, {
+              //   pendingFlushCallbacks: this.pendingFlushCallbacks.length,
+              //   pendingWrites: this.pendingWrites,
+              //   sitemapCount: this.sitemapCount,
+              //   itemCountTotal: this.itemCountTotal,
+              //   item,
+              //   sitemapPath: this.currentSitemapPipeline?.path,
+              // });
+
+              // Handle the rotate
+              this.sitemapCount++;
+
+              // Loop around to try the write again
+              continue;
+            } else if (
+              error instanceof WriteAfterCloseTagError ||
+              error.code === 'ERR_STREAM_WRITE_AFTER_END' ||
+              error.code === 'ERR_STREAM_DESTROYED'
+            ) {
+              console.log(`Other exception`, {
+                errorName: error.name,
+                errorCode: error.code,
+                errorMessage: error.message,
+                pendingFlushCallbacks: this.pendingFlushCallbacks.length,
+                pendingWrites: this.pendingWrites,
+                sitemapCount: this.sitemapCount,
+                itemCountTotal: this.itemCountTotal,
+                item,
+                sitemapPath: this.currentSitemapPipeline?.path,
+              });
+
+              if (this.currentSitemap === sitemapAtStart) {
+                callback(new TypeError('resubmit to same sitemap not allowed'));
+                return;
+              } else {
+                // Re-submit the write to the current sitemap file
+                continue;
+              }
+            }
+
+            callback(error);
+            return;
+          }
+        }
+      } catch (error: any) {
+        console.log(`Error from catch`, {
+          errorName: error.name,
+          errorCode: error.code,
+          errorMessage: error.message,
+          pendingFlushCallbacks: this.pendingFlushCallbacks.length,
+          pendingWrites: this.pendingWrites,
+          sitemapCount: this.sitemapCount,
+          itemCountTotal: this.itemCountTotal,
+          item,
+          sitemapPath: this.currentSitemapPipeline?.path,
+        });
+      } finally {
+        this.pendingWrites--;
+
+        if (this.pendingWrites === 0 && this.pendingFlushCallbacks.length > 0) {
+          this.doTheFlush();
+        }
+      }
+    })();
   }
 
   _flush(cb: TransformCallback): void {
-    const onFinish = () => super._flush(cb);
+    console.log('_flush called', {
+      pendingFlushCallbacks: this.pendingFlushCallbacks.length,
+      pendingWrites: this.pendingWrites,
+      sitemapCount: this.sitemapCount,
+      itemCountTotal: this.itemCountTotal,
+      sitemapPath: this.currentSitemapPipeline?.path,
+    });
+    if (this.pendingWrites > 0 || this.pendingFlushCallbacks.length > 0) {
+      this.pendingFlushCallbacks.push(cb);
+    } else {
+      this.pendingFlushCallbacks.push(cb);
+      this.doTheFlush();
+    }
+  }
+
+  private doTheFlush(): void {
+    console.log(`doTheFlush`, {
+      pendingFlushCallbacks: this.pendingFlushCallbacks.length,
+      pendingWrites: this.pendingWrites,
+      sitemapCount: this.sitemapCount,
+      itemCountTotal: this.itemCountTotal,
+      sitemapPath: this.currentSitemapPipeline?.path,
+    });
+
+    const callbacks = this.pendingFlushCallbacks.slice();
+    this.pendingFlushCallbacks = [];
+    const onFinish = () => {
+      callbacks.forEach((cb) => {
+        super._flush(cb);
+      });
+    };
     this.currentSitemapPipeline?.on('finish', onFinish);
     this.currentSitemap.end(
       !this.currentSitemapPipeline ? onFinish : undefined
