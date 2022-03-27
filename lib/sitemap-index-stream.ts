@@ -3,7 +3,11 @@ import { IndexItem, SitemapItemLoose, ErrorLevel } from './types';
 import { SitemapStream, stylesheetInclude } from './sitemap-stream';
 import { element, otag, ctag } from './sitemap-xml';
 import { WriteStream } from 'fs';
-import { ByteLimitExceededError, CountLimitExceededError } from './errors';
+import {
+  ByteLimitExceededError,
+  CountLimitExceededError,
+  WriteAfterCloseTagError,
+} from './errors';
 
 export enum IndexTagNames {
   sitemap = 'sitemap',
@@ -177,6 +181,8 @@ export class SitemapAndIndexStream extends SitemapIndexStream {
         !(
           error instanceof ByteLimitExceededError ||
           error instanceof CountLimitExceededError ||
+          error instanceof WriteAfterCloseTagError ||
+          error.code === 'ERR_STREAM_WRITE_AFTER_END' ||
           error.code === 'ERR_STREAM_DESTROYED'
         )
       ) {
@@ -215,6 +221,8 @@ export class SitemapAndIndexStream extends SitemapIndexStream {
                 !(
                   error instanceof ByteLimitExceededError ||
                   error instanceof CountLimitExceededError ||
+                  error instanceof WriteAfterCloseTagError ||
+                  error.code === 'ERR_STREAM_WRITE_AFTER_END' ||
                   error.code === 'ERR_STREAM_DESTROYED'
                 )
               ) {
@@ -239,31 +247,14 @@ export class SitemapAndIndexStream extends SitemapIndexStream {
               });
             }
 
-            this._writeSMI(item, encoding, () => {
-              // push to index stream
-              super._transform(this.idxItem, encoding, callback);
-            });
-
-            // // Reached the countLimit before byteLimit exceeded
-            // const onFinish = () => {
-            //   [this.idxItem, this.currentSitemap, this.currentSitemapPipeline] =
-            //     this.getSitemapStream(this.itemCountTotal / this.countLimit);
-            //   this.currentSitemap.byteLimit = this.byteLimit;
-            //   this.currentSitemap.countLimit = this.countLimit;
-            //   this._writeSMI(item, encoding, () =>
-            //     // push to index stream
-            //     super._transform(this.idxItem, encoding, callback)
-            //   );
-            // };
-            // this.currentSitemapPipeline?.on('finish', onFinish);
-            // this.currentSitemap.end(
-            //   !this.currentSitemapPipeline ? onFinish : undefined
-            // );
-
             return true;
           }
 
-          if (error.code === 'ERR_STREAM_DESTROYED') {
+          if (
+            error instanceof WriteAfterCloseTagError ||
+            error.code === 'ERR_STREAM_WRITE_AFTER_END' ||
+            error.code === 'ERR_STREAM_DESTROYED'
+          ) {
             // Write the item again to the current sitemap
             // This will only happen once per item
             this._writeSMI(item, encoding, callback);
