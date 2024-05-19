@@ -44,7 +44,7 @@ export const simpleSitemapAndIndex = async ({
   publicBasePath?: string;
   limit?: number;
   gzip?: boolean;
-}): Promise<void> => {
+}): Promise<WriteStream> => {
   await promises.mkdir(destinationDir, { recursive: true });
   const sitemapAndIndexStream = new SitemapAndIndexStream({
     limit,
@@ -59,13 +59,13 @@ export const simpleSitemapAndIndex = async ({
       }
       const publicPath = normalize(publicBasePath + path);
 
-      let pipeline: WriteStream;
+      const ws = createWriteStream(writePath);
       if (gzip) {
-        pipeline = sitemapStream
+        sitemapStream
           .pipe(createGzip()) // compress the output of the sitemap
-          .pipe(createWriteStream(writePath)); // write it to sitemap-NUMBER.xml
+          .pipe(ws); // write it to sitemap-NUMBER.xml
       } else {
-        pipeline = sitemapStream.pipe(createWriteStream(writePath)); // write it to sitemap-NUMBER.xml
+        sitemapStream.pipe(ws); // write it to sitemap-NUMBER.xml
       }
 
       return [
@@ -74,7 +74,7 @@ export const simpleSitemapAndIndex = async ({
           sitemapHostname
         ).toString(),
         sitemapStream,
-        pipeline,
+        ws,
       ];
     },
   });
@@ -95,16 +95,14 @@ export const simpleSitemapAndIndex = async ({
     destinationDir,
     `./sitemap-index.xml${gzip ? '.gz' : ''}`
   );
+  const ws = createWriteStream(writePath);
   if (gzip) {
-    return pipeline(
-      src,
-      sitemapAndIndexStream,
-      createGzip(),
-      createWriteStream(writePath)
-    );
+    pipeline(src, sitemapAndIndexStream, createGzip(), ws);
   } else {
-    return pipeline(src, sitemapAndIndexStream, createWriteStream(writePath));
+    const ws = createWriteStream(writePath);
+    pipeline(src, sitemapAndIndexStream, ws);
   }
+  return ws;
 };
 
 export default simpleSitemapAndIndex;

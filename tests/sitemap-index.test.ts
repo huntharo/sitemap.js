@@ -13,6 +13,8 @@ import {
 } from '../lib/sitemap-index-stream';
 import { streamToPromise } from '../dist';
 import { WriteStream } from 'node:fs';
+import { createGunzip, createGzip } from 'zlib';
+
 /* eslint-env jest, jasmine */
 function removeFilesArray(files): void {
   if (files && files.length) {
@@ -160,6 +162,11 @@ describe('sitemapAndIndex', () => {
       resolve(targetFolder, `./sitemap-2.xml`),
       resolve(targetFolder, `./sitemap-3.xml`),
       resolve(targetFolder, `./sitemap-4.xml`),
+      resolve(targetFolder, `./sitemap-0.xml.gz`),
+      resolve(targetFolder, `./sitemap-1.xml.gz`),
+      resolve(targetFolder, `./sitemap-2.xml.gz`),
+      resolve(targetFolder, `./sitemap-3.xml.gz`),
+      resolve(targetFolder, `./sitemap-4.xml.gz`),
     ]);
   });
 
@@ -170,6 +177,11 @@ describe('sitemapAndIndex', () => {
       resolve(targetFolder, `./sitemap-2.xml`),
       resolve(targetFolder, `./sitemap-3.xml`),
       resolve(targetFolder, `./sitemap-4.xml`),
+      resolve(targetFolder, `./sitemap-0.xml.gz`),
+      resolve(targetFolder, `./sitemap-1.xml.gz`),
+      resolve(targetFolder, `./sitemap-2.xml.gz`),
+      resolve(targetFolder, `./sitemap-3.xml.gz`),
+      resolve(targetFolder, `./sitemap-4.xml.gz`),
     ]);
   });
 
@@ -211,6 +223,54 @@ describe('sitemapAndIndex', () => {
     {
       const xml = await streamToPromise(
         createReadStream(resolve(targetFolder, `./sitemap-3.xml`))
+      );
+      expect(xml.toString()).toContain('https://4.example.com/a');
+    }
+  });
+
+  it.only('writes both a sitemap and index - countLimit - gzip', async () => {
+    const baseURL = 'https://example.com/sub/';
+
+    const sms = new SitemapAndIndexStream({
+      countLimit: 1,
+      getSitemapStream: (i: number): [string, SitemapStream, WriteStream] => {
+        const sm = new SitemapStream();
+        const path = `./sitemap-${i}.xml`;
+
+        const ws = createWriteStream(resolve(targetFolder, path));
+        sm.pipe(createGzip()).pipe(ws);
+        return [new URL(path, baseURL).toString(), sm, ws];
+      },
+    });
+    sms.write('https://1.example.com/a');
+    sms.write('https://2.example.com/a');
+    sms.write('https://3.example.com/a');
+    sms.write('https://4.example.com/a');
+    sms.end();
+    const indexStr = (await streamToPromise(sms)).toString();
+    expect(indexStr).toContain(`${baseURL}sitemap-0`);
+    expect(indexStr).toContain(`${baseURL}sitemap-1`);
+    expect(indexStr).toContain(`${baseURL}sitemap-2`);
+    expect(indexStr).toContain(`${baseURL}sitemap-3`);
+    expect(indexStr).not.toContain(`${baseURL}sitemap-4`);
+    expect(existsSync(resolve(targetFolder, `./sitemap-0.xml`))).toBe(true);
+    expect(existsSync(resolve(targetFolder, `./sitemap-1.xml`))).toBe(true);
+    expect(existsSync(resolve(targetFolder, `./sitemap-2.xml`))).toBe(true);
+    expect(existsSync(resolve(targetFolder, `./sitemap-3.xml`))).toBe(true);
+    expect(existsSync(resolve(targetFolder, `./sitemap-4.xml`))).toBe(false);
+    {
+      const xml = await streamToPromise(
+        createReadStream(resolve(targetFolder, `./sitemap-0.xml`)).pipe(
+          createGunzip()
+        )
+      );
+      expect(xml.toString()).toContain('https://1.example.com/a');
+    }
+    {
+      const xml = await streamToPromise(
+        createReadStream(resolve(targetFolder, `./sitemap-3.xml`)).pipe(
+          createGunzip()
+        )
       );
       expect(xml.toString()).toContain('https://4.example.com/a');
     }

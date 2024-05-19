@@ -364,7 +364,10 @@ export class SitemapAndIndexStream extends SitemapIndexStream {
                 sitemapPath: this.currentSitemapPipeline?.path,
               });
 
-              await finishedAsync(this.currentSitemap);
+              if (!this.currentSitemap.destroyed) {
+                this.currentSitemap.end();
+                await finishedAsync(this.currentSitemap);
+              }
 
               console.log(`Rotating sitemap - prior finished`, {
                 pendingFlushCallbacks: this.pendingFlushCallbacks.length,
@@ -494,24 +497,51 @@ export class SitemapAndIndexStream extends SitemapIndexStream {
   }
 
   private doTheFlush(): void {
-    console.log(`doTheFlush`, {
-      pendingFlushCallbacks: this.pendingFlushCallbacks.length,
-      pendingWrites: this.pendingWrites,
-      sitemapCount: this.sitemapCount,
-      itemCountTotal: this.itemCountTotal,
-      sitemapPath: this.currentSitemapPipeline?.path,
-    });
-
-    const callbacks = this.pendingFlushCallbacks.slice();
-    this.pendingFlushCallbacks = [];
-    const onFinish = () => {
-      callbacks.forEach((cb) => {
-        super._flush(cb);
+    try {
+      console.log(`doTheFlush`, {
+        pendingFlushCallbacks: this.pendingFlushCallbacks.length,
+        pendingWrites: this.pendingWrites,
+        sitemapCount: this.sitemapCount,
+        itemCountTotal: this.itemCountTotal,
+        sitemapPath: this.currentSitemapPipeline?.path,
       });
-    };
-    this.currentSitemapPipeline?.on('finish', onFinish);
-    this.currentSitemap.end(
-      !this.currentSitemapPipeline ? onFinish : undefined
-    );
+
+      const callbacks = this.pendingFlushCallbacks.slice();
+      this.pendingFlushCallbacks = [];
+      const onFinish = () => {
+        callbacks.forEach((cb) => {
+          console.log(`doTheFlush - calling super._flush`, {
+            pendingFlushCallbacks: this.pendingFlushCallbacks.length,
+            pendingWrites: this.pendingWrites,
+            sitemapCount: this.sitemapCount,
+            itemCountTotal: this.itemCountTotal,
+            sitemapPath: this.currentSitemapPipeline?.path,
+          });
+          this._flush(cb);
+          console.log(`doTheFlush - returned from super._flush`, {
+            pendingFlushCallbacks: this.pendingFlushCallbacks.length,
+            pendingWrites: this.pendingWrites,
+            sitemapCount: this.sitemapCount,
+            itemCountTotal: this.itemCountTotal,
+            sitemapPath: this.currentSitemapPipeline?.path,
+          });
+        });
+      };
+      this.currentSitemapPipeline?.on('finish', onFinish);
+      this.currentSitemap.end(
+        !this.currentSitemapPipeline ? onFinish : undefined
+      );
+    } catch (error: any) {
+      console.log(`doTheFlush Error`, {
+        errorName: error.name,
+        errorCode: error.code,
+        errorMessage: error.message,
+        pendingFlushCallbacks: this.pendingFlushCallbacks.length,
+        pendingWrites: this.pendingWrites,
+        sitemapCount: this.sitemapCount,
+        itemCountTotal: this.itemCountTotal,
+        sitemapPath: this.currentSitemapPipeline?.path,
+      });
+    }
   }
 }

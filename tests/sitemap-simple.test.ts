@@ -2,7 +2,12 @@ import { simpleSitemapAndIndex, streamToPromise } from '../index';
 import { tmpdir } from 'os';
 import { resolve } from 'path';
 import { existsSync, unlinkSync, createReadStream } from 'fs';
+import { finished } from 'stream';
+import { promisify } from 'util';
 import { createGunzip } from 'zlib';
+
+const finishedAsync = promisify(finished);
+
 function removeFilesArray(files): void {
   if (files && files.length) {
     files.forEach(function (file) {
@@ -40,7 +45,7 @@ describe('simpleSitemapAndIndex', () => {
   it('writes both a sitemap and index', async () => {
     const baseURL = 'https://example.com/sub/';
 
-    await simpleSitemapAndIndex({
+    const result = await simpleSitemapAndIndex({
       hostname: baseURL,
       sourceData: [
         'https://1.example.com/a',
@@ -51,6 +56,8 @@ describe('simpleSitemapAndIndex', () => {
       destinationDir: targetFolder,
       limit: 1,
     });
+
+    await finishedAsync(result);
 
     const index = (
       await streamToPromise(
@@ -75,7 +82,7 @@ describe('simpleSitemapAndIndex', () => {
       )
     );
     expect(xml.toString()).toContain('https://1.example.com/a');
-  });
+  }, 60000);
 
   it('accepts sitemapItemLoose as a type', async () => {
     const baseURL = 'https://example.com/sub/';

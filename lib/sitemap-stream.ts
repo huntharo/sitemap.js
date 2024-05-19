@@ -243,13 +243,23 @@ export class SitemapStream extends Transform {
         // Write the close tag as the stream will be ended by raising an error
         this.push(closetag);
         this._wroteCloseTag = true;
+        this._flush(() => {
+          // Transform will call .end()
+          callback(
+            new ByteLimitExceededError(
+              'Byte count limit would be exceeded, not writing, stream will close'
+            )
+          );
+        });
 
-        // Transform will call .end()
-        callback(
-          new ByteLimitExceededError(
-            'Byte count limit would be exceeded, not writing, stream will close'
-          )
-        );
+        this.on('error', (error) => {
+          if (
+            error instanceof ByteLimitExceededError ||
+            error instanceof CountLimitExceededError
+          ) {
+            return;
+          }
+        });
         return;
       }
     }

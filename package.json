@@ -27,7 +27,7 @@
     "build": "tsc",
     "prepare": "husky install",
     "prepublishOnly": "rm -rf dist && npm run test",
-    "test": "eslint lib/* ./cli.ts && tsc && jest ./tests/sitemap*",
+    "test": "eslint lib/* ./cli.ts && tsc && jest",
     "test:full": "eslint lib/* ./cli.ts && tsc && jest && npm run test:xmllint",
     "test:perf": "node ./tests/perf.js",
     "test:schema": "node tests/alltags.js | xmllint --schema schema/all.xsd --noout -",
@@ -130,6 +130,9 @@
     ]
   },
   "jest": {
+    "roots": [
+      "<rootDir>tests/"
+    ],
     "collectCoverage": true,
     "collectCoverageFrom": [
       "lib/**/*.ts",
@@ -186,6 +189,5 @@
   "engines": {
     "node": ">=12.0.0",
     "npm": ">=5.6.0"
-  },
-  "License": "MIT"
+  }
 }
